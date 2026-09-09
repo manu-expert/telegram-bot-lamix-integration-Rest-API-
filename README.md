@@ -1,56 +1,64 @@
-# Telegram Bot — Lamix SMS Reseller Panel Integration
+# Telegram Bot — SMS Panel Reseller Integration
 
-A production Telegram bot that gives an SMS-reselling agent's clients self-service access to their Lamix panel account — requesting numbers, checking their own CDR history, and receiving a live feed of incoming traffic — without ever touching the Lamix web panel directly.
-
-Built and deployed for a live business (client accounts, real inventory, real money), currently running 24/7 on a Linux VPS.
+A production Telegram bot that lets an SMS-reselling agent's clients self-serve number allocation, view their own CDR history, and receive a live traffic feed — all backed by a real third-party REST API (Lamix SMS panel). Built end-to-end: bot logic, database design, background job scheduling, and production deployment.
 
 ## What it does
 
-**For clients (linked to a Lamix account):**
-- `/link_acc` / `/unlink_acc` — self-service account linking, validated against the agent's real client roster, auto-approved on a valid match
-- `/addnum` — browse live number-range inventory (grouped, paginated from the Lamix API), request a quantity, and get real MSISDNs assigned to their account on the spot
-- `/my_cdr` — pull their own message/CDR history for the last 10 minutes, filtered out of the agent's full traffic firehose
-- A rolling 24-hour, per-client, per-range quota (enforced server-side, not just client-side) to prevent inventory abuse
+- **Client onboarding & access control** — allow-listing, account linking against a live client roster synced from the upstream API, auto-approval on successful link
+- **Self-service number requests (`/addnum`)** — clients browse live inventory (grouped/ungrouped ranges), request a quantity, and get real MSISDNs assigned to their account via the panel's assign API — with a rolling 24h per-range quota enforced server-side
+- **Personal CDR lookup (`/my_cdr`)** — a client can pull their own call/message history even though the upstream API has no "filter by client" endpoint on that resource; solved by resolving the client's held numbers once, then fetching and filtering agent-wide records with automatic time-window bisection to respect strict rate limits
+- **Live traffic feed** — a background job polls new messages every 20s and posts each one individually to a public channel, with number masking and tap-to-copy inline buttons (Telegram's `CopyTextButton`)
+- **Admin tooling** — allow-list management, client roster sync, member overview, bot-wide command menu (`setMyCommands`) scoped differently for admins vs. regular users
 
-**For the agent (admin):**
-- `/adduser`, `/removeuser` — allow-list management, independent of Lamix account linking
-- `/syncclients` — pull the live client roster from Lamix instead of registering usernames by hand
-- A live channel feed: every incoming SMS gets posted to a Telegram channel in near-real-time, with the phone number partially masked and one-tap "copy" buttons for the CLI and extracted verification code
+## Technical highlights
 
-## Why it's interesting technically
-
-- **Rate-limit-aware pagination against a real third-party REST API.** Lamix caps responses at 500 records/call with no cursor on some endpoints — the CDR lookup recursively bisects a time window only when a page comes back full, instead of blindly paginating a potentially enormous dataset (one client alone held 13,000+ assigned numbers in production).
-- **A live "what's new" feed built without a webhook.** No `client` filter exists on Lamix's message endpoint, so the channel feed polls on a cursor persisted in SQLite (survives restarts, no gaps, no dupes) rather than an in-memory "last seen" timestamp.
-- **Self-healing background jobs.** A held-numbers cache is pre-warmed on a schedule so an interactive command never blocks on a slow upstream pagination call the user is actually waiting on.
-- **Deployed as a real systemd service** on a Linux VPS with `Restart=always`, after diagnosing and fixing a nasty Windows-specific bug during earlier local hosting (a supervisor script's `-Wait` silently failing to block, leading to multiple zombie instances of the bot polling the same Telegram token simultaneously — root-caused via process inspection, not guesswork).
+- **Rate-limit-aware API client** (`lamix_api.py`) — every endpoint call respects the upstream's per-endpoint burst/sustained limits; paginated endpoints (`/numbers`) are consumed via cursor, and unpaginated ones (`/cdrs`, capped at 500 records/call) are fetched via automatic recursive time-window bisection when a page comes back full
+- **Persistence across restarts** — `PicklePersistence` for in-flight conversational state (so a mid-flow `/addnum` survives a process restart) plus a SQLite-backed cache (refreshed on a background job) for expensive per-client lookups that would otherwise take over a minute to recompute on every request
+- **Defensive design from real production incidents** — e.g. a client turned out to hold 13,000+ numbers, which made a naive per-number CDR query loop take 8+ hours; the fix (batch time-window queries + client-side filtering) cut that to under 2 minutes
+- **HTML-safe dynamic messages** — every piece of user- or API-sourced text is escaped before being interpolated into Telegram's HTML parse mode, avoiding `Bad Request: can't parse entities` failures
+- **Background scheduling** via `python-telegram-bot`'s `JobQueue` (APScheduler under the hood) for the live traffic feed and periodic cache refresh, running alongside the main polling loop
 
 ## Tech stack
 
-- Python 3.10+, [`python-telegram-bot`](https://github.com/python-telegram-bot/python-telegram-bot) (async, `JobQueue`, `PicklePersistence`)
-- `httpx` for the Lamix REST API client
-- SQLite for local state (members, allow-list, client roster, quota history, number-cache)
-- systemd for process supervision in production
+- **Python 3.10+**, [`python-telegram-bot`](https://github.com/python-telegram-bot/python-telegram-bot) (async, `JobQueue`, `PicklePersistence`)
+- `httpx` for the upstream REST API client
+- **SQLite** for all persistent state (members, allow-list, client roster, quota tracking, held-number cache)
+- Deployed on a Linux VPS as a `systemd` service (auto-restart, survives reboots)
 
 ## Project structure
 
 ```
-bot.py          Telegram handlers, commands, jobs
-lamix_api.py    Thin async client for the Lamix panel REST API
-db.py           SQLite access layer
-config.py       Environment-based configuration
+bot.py          — Telegram handlers, commands, background jobs, formatting
+lamix_api.py    — thin, rate-limit-aware REST client for the upstream SMS panel API
+db.py           — SQLite access layer (schema + queries)
+config.py       — environment-based configuration
 requirements.txt
+.env.example    — documents every required environment variable
 ```
 
-## Running it yourself
+## Running it
 
 ```bash
-pip install -r requirements.txt
-cp .env.example .env   # fill in your own bot token, Lamix API token, etc.
+python -m venv venv
+./venv/bin/pip install -r requirements.txt
+cp .env.example .env   # fill in your own values
 python bot.py
 ```
 
-See `.env.example` for every configuration option (bot token, admin IDs, required channels, Lamix API credentials, traffic channel ID).
+For production, run it under a process supervisor — a sample `systemd` unit:
 
----
+```ini
+[Unit]
+Description=Telegram Bot
+After=network-online.target
 
-*Built by M Mohsin Ali.*
+[Service]
+Type=simple
+WorkingDirectory=/opt/telegram-bot
+ExecStart=/opt/telegram-bot/venv/bin/python /opt/telegram-bot/bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
