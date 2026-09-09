@@ -6,11 +6,11 @@ A production Telegram bot that lets an SMS-reselling agent's clients self-serve 
 
 | Welcome menu | Live range picker |
 |---|---|
-| ![Welcome menu](screenshots/start-menu.png) | ![Range picker](screenshots/addnum-picker.jpeg) |
+| ![Welcome menu](screenshots/start-menu-small.png) | ![Range picker](screenshots/addnum-picker-small.png) |
 
 | Number request completed | Full command list |
 |---|---|
-| ![Order completed](screenshots/addnum-assigned.png) | ![Help command](screenshots/help-command.png) |
+| ![Order completed](screenshots/addnum-assigned-small.png) | ![Help command](screenshots/help-command-small.png) |
 
 *(Real phone numbers redacted — the flow itself is shown live against production inventory.)*
 
