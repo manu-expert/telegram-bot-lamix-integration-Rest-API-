@@ -2,6 +2,18 @@
 
 A production Telegram bot that lets an SMS-reselling agent's clients self-serve number allocation, view their own CDR history, and receive a live traffic feed — all backed by a real third-party REST API (Lamix SMS panel). Built end-to-end: bot logic, database design, background job scheduling, and production deployment.
 
+## Screenshots
+
+| Welcome menu | Live range picker |
+|---|---|
+| ![Welcome menu](screenshots/start-menu.png) | ![Range picker](screenshots/addnum-picker.jpeg) |
+
+| Number request completed | Full command list |
+|---|---|
+| ![Order completed](screenshots/addnum-assigned.png) | ![Help command](screenshots/help-command.png) |
+
+*(Real phone numbers redacted — the flow itself is shown live against production inventory.)*
+
 ## What it does
 
 - **Client onboarding & access control** — allow-listing, account linking against a live client roster synced from the upstream API, auto-approval on successful link
