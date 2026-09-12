@@ -100,12 +100,12 @@ async def fetch_free_numbers(range_id: str, limit: int) -> list:
     return numbers[:limit]
 
 
-async def fetch_client_numbers(client_id: str) -> list:
-    """All numbers currently held by this client (paginated)."""
+async def fetch_all_numbers(assigned: str = "true") -> list:
+    """All numbers in the agent's inventory, paginated (no client filter - see fetch_client_numbers)."""
     numbers: list = []
     after = None
     while True:
-        params = {"clientId": client_id, "limit": 500}
+        params = {"assigned": assigned, "limit": 500}
         if after:
             params["after"] = after
         data = await _get("/api/v1/numbers", params)
@@ -116,6 +116,18 @@ async def fetch_client_numbers(client_id: str) -> list:
             break
         await asyncio.sleep(1.1)
     return numbers
+
+
+async def fetch_client_numbers(client_id: str) -> list:
+    """All numbers currently held by this client.
+
+    /api/v1/numbers has no server-side client filter (only range/assigned are
+    supported - an unrecognized `client`/`clientId` param is silently ignored
+    and the full agent-wide list comes back instead). Fetch everything and
+    filter by the `client` field on each record here.
+    """
+    all_numbers = await fetch_all_numbers(assigned="true")
+    return [n for n in all_numbers if (n.get("client") or "").lower() == client_id.lower()]
 
 
 async def fetch_cdrs(number: str = None, from_iso: str = None, to_iso: str = None, limit: int = 500) -> list:

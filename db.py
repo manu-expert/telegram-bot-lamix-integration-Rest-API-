@@ -18,6 +18,11 @@ def _connect():
         conn.close()
 
 
+def _column_exists(conn, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in rows)
+
+
 def init_db() -> None:
     with _connect() as conn:
         conn.execute(
@@ -47,10 +52,13 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS agent_clients (
                 username TEXT PRIMARY KEY,
                 added_by INTEGER NOT NULL,
-                added_at TEXT NOT NULL
+                added_at TEXT NOT NULL,
+                pin TEXT
             )
             """
         )
+        if not _column_exists(conn, "agent_clients", "pin"):
+            conn.execute("ALTER TABLE agent_clients ADD COLUMN pin TEXT")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS state (
@@ -192,6 +200,23 @@ def add_agent_client(username: str, added_by: int) -> None:
             "INSERT OR IGNORE INTO agent_clients (username, added_by, added_at) VALUES (?, ?, ?)",
             (username, added_by, datetime.now(timezone.utc).isoformat()),
         )
+
+
+def set_client_pin(username: str, pin: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE agent_clients SET pin = ? WHERE username = ? COLLATE NOCASE",
+            (pin, username),
+        )
+
+
+def get_client_pin(username: str) -> Optional[str]:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT pin FROM agent_clients WHERE username = ? COLLATE NOCASE",
+            (username,),
+        ).fetchone()
+        return row["pin"] if row else None
 
 
 def list_agent_clients() -> list:

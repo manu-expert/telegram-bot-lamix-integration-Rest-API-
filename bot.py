@@ -3,6 +3,7 @@ import functools
 import html
 import logging
 import re
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from telegram import (
@@ -216,7 +217,7 @@ def help_text(user_id: int) -> str:
         lines += [
             "",
             "🛠 <b>Admin commands</b>",
-            "/adduser &lt;user_id&gt; - grant a client access to the bot",
+            "/adduser &lt;user_id&gt; &lt;username&gt; - grant a client access and issue their PIN",
             "/removeuser &lt;user_id&gt; - revoke a client's access",
             "/syncclients - pull your client roster from Lamix automatically",
             "/clients - list registered client usernames",
@@ -296,6 +297,9 @@ async def link_acc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await offer_link_prompt(update.message, update.effective_user.id, context)
 
 
+MAX_PIN_ATTEMPTS = 5
+
+
 async def handle_username_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data["awaiting_username"] = False
     raw_input = update.message.text.strip().lstrip("@")
@@ -307,6 +311,52 @@ async def handle_username_reply(update: Update, context: ContextTypes.DEFAULT_TY
             "Use /link_acc to try again."
         )
         return
+
+    if not db.get_client_pin(username):
+        await update.message.reply_text(
+            "⚠️ <b>No PIN has been set up for this account yet.</b>\n"
+            "Ask the admin to grant you access with /adduser, then try /link_acc again."
+        )
+        return
+
+    context.user_data["pending_link_username"] = username
+    context.user_data["awaiting_pin"] = True
+    context.user_data["pin_attempts"] = 0
+    acc = html.escape(display_client_username(username))
+    await update.message.reply_text(
+        f"🔑 <b>Enter the 6-digit PIN</b> for <b>{acc}</b> (given to you by the admin).\n\n/cancel"
+    )
+
+
+async def handle_pin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    username = context.user_data.get("pending_link_username")
+    entered_pin = update.message.text.strip()
+
+    if not username:
+        context.user_data["awaiting_pin"] = False
+        await update.message.reply_text("⚠️ Session expired. Use /link_acc to start again.")
+        return
+
+    correct_pin = db.get_client_pin(username)
+    if not correct_pin or entered_pin != correct_pin:
+        context.user_data["pin_attempts"] = context.user_data.get("pin_attempts", 0) + 1
+        if context.user_data["pin_attempts"] >= MAX_PIN_ATTEMPTS:
+            context.user_data["awaiting_pin"] = False
+            context.user_data.pop("pending_link_username", None)
+            context.user_data.pop("pin_attempts", None)
+            await update.message.reply_text(
+                "🚫 <b>Too many incorrect attempts.</b>\nUse /link_acc to start again."
+            )
+            return
+        remaining = MAX_PIN_ATTEMPTS - context.user_data["pin_attempts"]
+        await update.message.reply_text(
+            f"❌ <b>Incorrect PIN.</b> {remaining} attempt(s) left, or /cancel."
+        )
+        return
+
+    context.user_data["awaiting_pin"] = False
+    context.user_data.pop("pending_link_username", None)
+    context.user_data.pop("pin_attempts", None)
 
     db.link_account(update.effective_user.id, username)
     db.set_approved(update.effective_user.id, True)
@@ -335,14 +385,36 @@ async def unlink_acc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("⚠️ You don't have a linked account.")
 
 
+def generate_pin() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
 @require_admin
 async def add_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("Usage: /adduser &lt;telegram_user_id&gt;")
+    if len(context.args) < 2 or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /adduser &lt;telegram_user_id&gt; &lt;username&gt;")
         return
+
     target_id = int(context.args[0])
+    raw_username = context.args[1].strip().lstrip("@")
+    username = db.resolve_agent_client(raw_username) or db.resolve_agent_client(f"CT_{raw_username}")
+    if not username:
+        await update.message.reply_text(
+            "❌ <b>Unknown username.</b> This doesn't match any client in the roster.\n"
+            "Run /syncclients first, or double check the username."
+        )
+        return
+
+    pin = generate_pin()
+    db.set_client_pin(username, pin)
     db.add_allowed_user(target_id, update.effective_user.id)
-    await update.message.reply_text(f"✅ User <code>{target_id}</code> added to the allow-list.")
+
+    acc = html.escape(display_client_username(username))
+    await update.message.reply_text(
+        f"✅ User <code>{target_id}</code> added to the allow-list for <b>{acc}</b>.\n"
+        f"🔑 <b>PIN:</b> <code>{pin}</code>\n"
+        "Share this PIN with the client - they'll need it to complete /link_acc."
+    )
     try:
         await context.bot.send_message(
             target_id, "✅ You've been granted access to this bot. Send /start to begin."
@@ -645,13 +717,24 @@ async def fetch_cdrs_window(since: datetime, until: datetime, depth: int = 0) ->
 
 
 async def refresh_held_numbers_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
-    for client_username in db.list_distinct_linked_clients():
-        try:
-            held = await lamix_api.fetch_client_numbers(client_username)
-        except lamix_api.LamixApiError as e:
-            logger.warning("Held-numbers refresh failed for %s: %s", client_username, e.code)
-            continue
-        db.set_held_numbers_cache(client_username, [n["number"] for n in held])
+    linked_clients = db.list_distinct_linked_clients()
+    if not linked_clients:
+        return
+
+    try:
+        all_numbers = await lamix_api.fetch_all_numbers(assigned="true")
+    except lamix_api.LamixApiError as e:
+        logger.warning("Held-numbers refresh failed: %s", e.code)
+        return
+
+    numbers_by_client: dict = {}
+    for n in all_numbers:
+        owner = (n.get("client") or "").lower()
+        numbers_by_client.setdefault(owner, []).append(n["number"])
+
+    for client_username in linked_clients:
+        held = numbers_by_client.get(client_username.lower(), [])
+        db.set_held_numbers_cache(client_username, held)
         logger.info("Refreshed held-numbers cache for %s: %d number(s)", client_username, len(held))
 
 
@@ -722,13 +805,19 @@ async def my_cdr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data["awaiting_quantity"] = False
     context.user_data["awaiting_username"] = False
+    context.user_data["awaiting_pin"] = False
     context.user_data.pop("selected_range", None)
+    context.user_data.pop("pending_link_username", None)
+    context.user_data.pop("pin_attempts", None)
     await update.message.reply_text("🚫 Cancelled.")
 
 
 async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.user_data.get("awaiting_quantity"):
         await handle_quantity_reply(update, context)
+        return
+    if context.user_data.get("awaiting_pin"):
+        await handle_pin_reply(update, context)
         return
     if context.user_data.get("awaiting_username"):
         await handle_username_reply(update, context)
