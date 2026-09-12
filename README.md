@@ -8,15 +8,19 @@ A production Telegram bot that lets an SMS-reselling agent's clients self-serve 
 |---|---|
 | ![Welcome menu](screenshots/start-menu-small.png) | ![Range picker](screenshots/addnum-picker-small.png) |
 
-| Number request completed | Full command list |
+| Number request completed | PIN-protected account linking |
 |---|---|
-| ![Order completed](screenshots/addnum-assigned-small.png) | ![Help command](screenshots/help-command-small.png) |
+| ![Order completed](screenshots/addnum-assigned-small.png) | ![PIN-protected linking](screenshots/link-acc-pin-flow-small.png) |
+
+| Admin: granting access |
+|---|
+| ![Adduser usage](screenshots/adduser-usage-small.png) |
 
 *(Real phone numbers redacted — the flow itself is shown live against production inventory.)*
 
 ## What it does
 
-- **Client onboarding & access control** — allow-listing, account linking against a live client roster synced from the upstream API, auto-approval on successful link
+- **Client onboarding & access control** — allow-listing, account linking against a live client roster synced from the upstream API, gated by an admin-issued 6-digit PIN so linking requires proof of identity, not just a known username
 - **Self-service number requests (`/addnum`)** — clients browse live inventory (grouped/ungrouped ranges), request a quantity, and get real MSISDNs assigned to their account via the panel's assign API — with a rolling 24h per-range quota enforced server-side
 - **Personal CDR lookup (`/my_cdr`)** — a client can pull their own call/message history even though the upstream API has no "filter by client" endpoint on that resource; solved by resolving the client's held numbers once, then fetching and filtering agent-wide records with automatic time-window bisection to respect strict rate limits
 - **Live traffic feed** — a background job polls new messages every 20s and posts each one individually to a public channel, with number masking and tap-to-copy inline buttons (Telegram's `CopyTextButton`)
