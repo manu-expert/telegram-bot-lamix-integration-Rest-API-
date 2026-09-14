@@ -1,4 +1,3 @@
-import asyncio
 import functools
 import html
 import logging
@@ -194,7 +193,6 @@ MAIN_MENU_TEXT = (
     "🔓 /unlink_acc - unlink your current account\n"
     "📊 /status - check your linked account status\n"
     "📱 /addnum - request numbers from available ranges\n"
-    "📊 /my_cdr - show your CDR history for the last 10 minutes\n"
     "❓ /help - show all commands"
     + BOT_CREDIT
 )
@@ -210,7 +208,6 @@ def help_text(user_id: int) -> str:
         "🔓 /unlink_acc - unlink your current account",
         "📊 /status - check your linked account status",
         "📱 /addnum - request numbers from available ranges (needs approval)",
-        "📊 /my_cdr - show your CDR history for the last 24 hours",
         "🚫 /cancel - cancel an in-progress request",
     ]
     if user_id in ADMIN_IDS:
@@ -291,6 +288,17 @@ def clear_flow_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("pending_link_username", None)
     context.user_data.pop("pin_attempts", None)
     context.user_data.pop("selected_range", None)
+
+
+async def reset_flow_on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear any pending awaiting-reply state before a slash command runs.
+
+    Runs in an earlier handler group than the actual command handlers, so it
+    never blocks them - it just guarantees that issuing *any* command (e.g.
+    /removeuser) can't get misread as a reply to an older, abandoned prompt
+    (e.g. a PIN request from an incomplete /link_acc).
+    """
+    clear_flow_state(context)
 
 
 async def offer_link_prompt(message, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -681,141 +689,6 @@ async def format_numbers_callback(update: Update, context: ContextTypes.DEFAULT_
     )
 
 
-CDR_DIVIDER = "―" * 20
-TELEGRAM_MESSAGE_LIMIT = 3500
-HELD_NUMBERS_REFRESH_INTERVAL = 1200
-
-
-async def reply_in_chunks(message, lines: list) -> None:
-    chunk: list = []
-    chunk_len = 0
-    for line in lines:
-        if chunk and chunk_len + len(line) + 1 > TELEGRAM_MESSAGE_LIMIT:
-            await message.reply_text("\n".join(chunk))
-            chunk, chunk_len = [], 0
-        chunk.append(line)
-        chunk_len += len(line) + 1
-    if chunk:
-        await message.reply_text("\n".join(chunk))
-
-
-def format_cdr_entry(r: dict) -> str:
-    time_str = html.escape(str(r.get("time") or "-"))
-    cli = html.escape(str(r.get("cli") or "-"))
-    number = html.escape(str(r.get("number") or "-"))
-    content = html.escape(str(r.get("content") or "-"))
-    range_name = html.escape(str(r.get("range") or "-"))
-    status = html.escape(str(r.get("status") or "-"))
-    payout = html.escape(str(r.get("clientPayout") or "0.0000"))
-    return (
-        f"<b>{cli}</b>\n"
-        f"{number}\n\n"
-        f"{content}\n"
-        f"{time_str}\n\n"
-        f"Range: {range_name} | Status: {status} | Payout: {payout}"
-    )
-
-
-async def fetch_cdrs_window(since: datetime, until: datetime, depth: int = 0) -> list:
-    """Fetch all agent-wide CDRs in [since, until), bisecting the window if a page comes back full."""
-    from_iso = since.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    to_iso = until.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    records = await lamix_api.fetch_cdrs(from_iso=from_iso, to_iso=to_iso, limit=500)
-    await asyncio.sleep(1.1)
-
-    if len(records) < 500 or depth >= 6:
-        return records
-
-    mid = since + (until - since) / 2
-    first_half = await fetch_cdrs_window(since, mid, depth + 1)
-    second_half = await fetch_cdrs_window(mid, until, depth + 1)
-    return first_half + second_half
-
-
-async def refresh_held_numbers_cache(context: ContextTypes.DEFAULT_TYPE) -> None:
-    linked_clients = db.list_distinct_linked_clients()
-    if not linked_clients:
-        return
-
-    try:
-        all_numbers = await lamix_api.fetch_all_numbers(assigned="true")
-    except lamix_api.LamixApiError as e:
-        logger.warning("Held-numbers refresh failed: %s", e.code)
-        return
-
-    numbers_by_client: dict = {}
-    for n in all_numbers:
-        owner = (n.get("client") or "").lower()
-        numbers_by_client.setdefault(owner, []).append(n["number"])
-
-    for client_username in linked_clients:
-        held = numbers_by_client.get(client_username.lower(), [])
-        db.set_held_numbers_cache(client_username, held)
-        logger.info("Refreshed held-numbers cache for %s: %d number(s)", client_username, len(held))
-
-
-@require_allowed
-@require_membership
-@require_linked_approved
-async def my_cdr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if context.user_data.get("cdr_in_progress"):
-        await update.message.reply_text("⏳ Already fetching your CDR history - please wait for that to finish.")
-        return
-
-    context.user_data["cdr_in_progress"] = True
-    try:
-        member = db.get_member(update.effective_user.id)
-        client_username = member["linked_account_ref"]
-
-        cached = db.get_held_numbers_cache(client_username)
-        if cached:
-            held_set = set(cached["numbers"])
-        else:
-            await update.message.reply_text(
-                "⏳ Looking up your assigned numbers - this can take a minute or two the first time..."
-            )
-            try:
-                held_numbers = await lamix_api.fetch_client_numbers(client_username)
-            except lamix_api.LamixApiError as e:
-                await update.message.reply_text(f"❌ Could not fetch your numbers: <code>{e.code}</code>")
-                return
-
-            if not held_numbers:
-                await update.message.reply_text(
-                    "📭 You don't have any numbers assigned yet. Use /addnum to request some."
-                )
-                return
-
-            held_set = {n["number"] for n in held_numbers}
-            db.set_held_numbers_cache(client_username, list(held_set))
-
-        until = datetime.now(timezone.utc)
-        since = until - timedelta(minutes=10)
-        await update.message.reply_text(
-            f"⏳ Scanning the last 10 minutes of traffic across {len(held_set)} of your numbers..."
-        )
-
-        try:
-            all_records = await fetch_cdrs_window(since, until)
-        except lamix_api.LamixApiError as e:
-            await update.message.reply_text(f"❌ Could not fetch CDRs: <code>{e.code}</code>")
-            return
-
-        my_records = [r for r in all_records if r.get("number") in held_set]
-
-        if not my_records:
-            await update.message.reply_text("📭 No CDR activity on your numbers in the last 10 minutes.")
-            return
-
-        my_records.sort(key=lambda r: r["time"], reverse=True)
-
-        lines = [f"📊 <b>Your CDR history (last 10 minutes) - {len(my_records)} record(s)</b>"]
-        for r in my_records:
-            lines.append(CDR_DIVIDER)
-            lines.append(format_cdr_entry(r))
-        await reply_in_chunks(update.message, lines)
-    finally:
-        context.user_data["cdr_in_progress"] = False
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -949,7 +822,6 @@ GENERAL_COMMANDS = [
     BotCommand("unlink_acc", "Unlink your current account"),
     BotCommand("status", "Check your linked account status"),
     BotCommand("addnum", "Request numbers from available ranges"),
-    BotCommand("my_cdr", "Show your CDR history (last 10 minutes)"),
     BotCommand("cancel", "Cancel an in-progress request"),
     BotCommand("help", "Show all commands"),
 ]
@@ -1000,13 +872,14 @@ def main() -> None:
         builder = builder.proxy(PROXY_URL).get_updates_proxy(PROXY_URL)
     application = builder.build()
 
+    application.add_handler(MessageHandler(filters.COMMAND, reset_flow_on_command), group=-1)
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("link_acc", link_acc))
     application.add_handler(CommandHandler("unlink_acc", unlink_acc))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("addnum", addnum))
-    application.add_handler(CommandHandler("my_cdr", my_cdr))
     application.add_handler(CommandHandler("cancel", cancel))
     application.add_handler(CommandHandler("members", list_members_cmd))
     application.add_handler(CommandHandler("adduser", add_user))
@@ -1026,10 +899,6 @@ def main() -> None:
         logger.info("Live traffic feed polling every 20s, posting new messages to %s", TRAFFIC_CHANNEL_ID)
     else:
         logger.info("TRAFFIC_CHANNEL_ID not set - traffic feed disabled")
-
-    application.job_queue.run_repeating(
-        refresh_held_numbers_cache, interval=HELD_NUMBERS_REFRESH_INTERVAL, first=5
-    )
 
     logger.info("Bot starting...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)

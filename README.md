@@ -1,6 +1,6 @@
 # Telegram Bot — SMS Panel Reseller Integration
 
-A production Telegram bot that lets an SMS-reselling agent's clients self-serve number allocation, view their own CDR history, and receive a live traffic feed — all backed by a real third-party REST API (Lamix SMS panel). Built end-to-end: bot logic, database design, background job scheduling, and production deployment.
+A production Telegram bot that lets an SMS-reselling agent's clients self-serve number allocation and receive a live traffic feed — all backed by a real third-party REST API (Lamix SMS panel). Built end-to-end: bot logic, database design, background job scheduling, and production deployment.
 
 ## Screenshots
 
@@ -22,23 +22,21 @@ A production Telegram bot that lets an SMS-reselling agent's clients self-serve 
 
 - **Client onboarding & access control** — allow-listing, account linking against a live client roster synced from the upstream API, gated by an admin-issued 6-digit PIN so linking requires proof of identity, not just a known username
 - **Self-service number requests (`/addnum`)** — clients browse live inventory (grouped/ungrouped ranges), request a quantity, and get real MSISDNs assigned to their account via the panel's assign API — with a rolling 24h per-range quota enforced server-side
-- **Personal CDR lookup (`/my_cdr`)** — a client can pull their own call/message history even though the upstream API has no "filter by client" endpoint on that resource; solved by resolving the client's held numbers once, then fetching and filtering agent-wide records with automatic time-window bisection to respect strict rate limits
 - **Live traffic feed** — a background job polls new messages every 20s and posts each one individually to a public channel, with number masking and tap-to-copy inline buttons (Telegram's `CopyTextButton`)
 - **Admin tooling** — allow-list management, client roster sync, member overview, bot-wide command menu (`setMyCommands`) scoped differently for admins vs. regular users
 
 ## Technical highlights
 
-- **Rate-limit-aware API client** (`lamix_api.py`) — every endpoint call respects the upstream's per-endpoint burst/sustained limits; paginated endpoints (`/numbers`) are consumed via cursor, and unpaginated ones (`/cdrs`, capped at 500 records/call) are fetched via automatic recursive time-window bisection when a page comes back full
-- **Persistence across restarts** — `PicklePersistence` for in-flight conversational state (so a mid-flow `/addnum` survives a process restart) plus a SQLite-backed cache (refreshed on a background job) for expensive per-client lookups that would otherwise take over a minute to recompute on every request
-- **Defensive design from real production incidents** — e.g. a client turned out to hold 13,000+ numbers, which made a naive per-number CDR query loop take 8+ hours; the fix (batch time-window queries + client-side filtering) cut that to under 2 minutes
+- **Rate-limit-aware API client** (`lamix_api.py`) — every endpoint call respects the upstream's per-endpoint burst/sustained limits; paginated endpoints (`/numbers`) are consumed via cursor
+- **Persistence across restarts** — `PicklePersistence` for in-flight conversational state, so a mid-flow `/addnum` or `/link_acc` survives a process restart
 - **HTML-safe dynamic messages** — every piece of user- or API-sourced text is escaped before being interpolated into Telegram's HTML parse mode, avoiding `Bad Request: can't parse entities` failures
-- **Background scheduling** via `python-telegram-bot`'s `JobQueue` (APScheduler under the hood) for the live traffic feed and periodic cache refresh, running alongside the main polling loop
+- **Background scheduling** via `python-telegram-bot`'s `JobQueue` (APScheduler under the hood) for the live traffic feed, running alongside the main polling loop
 
 ## Tech stack
 
 - **Python 3.10+**, [`python-telegram-bot`](https://github.com/python-telegram-bot/python-telegram-bot) (async, `JobQueue`, `PicklePersistence`)
 - `httpx` for the upstream REST API client
-- **SQLite** for all persistent state (members, allow-list, client roster, quota tracking, held-number cache)
+- **SQLite** for all persistent state (members, allow-list, client roster, quota tracking)
 - Deployed on a Linux VPS as a `systemd` service (auto-restart, survives reboots)
 
 ## Project structure

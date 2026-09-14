@@ -1,4 +1,3 @@
-import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -64,15 +63,6 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS state (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS held_numbers_cache (
-                client_username TEXT PRIMARY KEY,
-                numbers TEXT NOT NULL,
-                updated_at TEXT NOT NULL
             )
             """
         )
@@ -246,39 +236,6 @@ def get_range_assignment_count(client_username: str, range_id: str, since_iso: s
             (client_username, range_id, since_iso),
         ).fetchone()
         return row["total"]
-
-
-def list_distinct_linked_clients() -> list:
-    with _connect() as conn:
-        rows = conn.execute(
-            "SELECT DISTINCT linked_account_ref FROM members "
-            "WHERE is_approved = 1 AND linked_account_ref IS NOT NULL"
-        ).fetchall()
-        return [row["linked_account_ref"] for row in rows]
-
-
-def get_held_numbers_cache(client_username: str) -> Optional[dict]:
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT numbers, updated_at FROM held_numbers_cache WHERE client_username = ? COLLATE NOCASE",
-            (client_username,),
-        ).fetchone()
-        if not row:
-            return None
-        return {"numbers": json.loads(row["numbers"]), "updated_at": row["updated_at"]}
-
-
-def set_held_numbers_cache(client_username: str, numbers: list) -> None:
-    with _connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO held_numbers_cache (client_username, numbers, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(client_username) DO UPDATE SET
-                numbers = excluded.numbers, updated_at = excluded.updated_at
-            """,
-            (client_username, json.dumps(numbers), datetime.now(timezone.utc).isoformat()),
-        )
 
 
 def get_state(key: str) -> Optional[str]:
