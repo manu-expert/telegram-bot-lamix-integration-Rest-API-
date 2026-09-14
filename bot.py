@@ -278,6 +278,21 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(help_text(update.effective_user.id))
 
 
+def clear_flow_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reset all pending conversational-flow state (link/PIN/quantity prompts).
+
+    Without this, a stale "awaiting" flag from an abandoned flow (e.g. someone
+    never finishing a PIN prompt) silently hijacks the *next* plain-text reply
+    - including replies meant for an unrelated command or a fresh /link_acc.
+    """
+    context.user_data["awaiting_username"] = False
+    context.user_data["awaiting_pin"] = False
+    context.user_data["awaiting_quantity"] = False
+    context.user_data.pop("pending_link_username", None)
+    context.user_data.pop("pin_attempts", None)
+    context.user_data.pop("selected_range", None)
+
+
 async def offer_link_prompt(message, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
     member = db.get_member(user_id)
     if member and member["linked_account_ref"]:
@@ -287,6 +302,7 @@ async def offer_link_prompt(message, user_id: int, context: ContextTypes.DEFAULT
             "To change, first use /unlink_acc."
         )
         return
+    clear_flow_state(context)
     context.user_data["awaiting_username"] = True
     await message.reply_text("🔗 Please send your username to link your account.")
 
@@ -803,12 +819,7 @@ async def my_cdr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data["awaiting_quantity"] = False
-    context.user_data["awaiting_username"] = False
-    context.user_data["awaiting_pin"] = False
-    context.user_data.pop("selected_range", None)
-    context.user_data.pop("pending_link_username", None)
-    context.user_data.pop("pin_attempts", None)
+    clear_flow_state(context)
     await update.message.reply_text("🚫 Cancelled.")
 
 
